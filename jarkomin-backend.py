@@ -3,37 +3,82 @@
 
 import json, urllib, urllib2
 import _mysql, MySQLdb, time
-import datetime
+import datetime, sys, getopt
+import ConfigParser
+import logging
 
-server_addr = 'http://jarkom.in/demo'
+def load_http(req_url, req_params):
+	try:
+		req_params = urllib.urlencode(req_params)
+		request = urllib2.urlopen(req_url, req_params)
+		response = request.read()
+		return response
+	except:
+		logging.error("Error while connecting to JARKOM.IN Server. Exiting.")
+		sys.exit(1)
+	return ""
+	
+def prepare_log_file():
+	logging.basicConfig(filename=logfile, format='%(asctime)s %(message)s', level=logging.DEBUG)
+	return
+	
+def read_configuration(filename):
+	global mysql_server, mysql_user, mysql_password, mysql_db, logfile, server_addr, fb_feature
+
+	global telkomsel_phoneid, xl_phoneid, three_phoneid, axis_phoneid, indosat_phoneid
+	config = ConfigParser.RawConfigParser()
+	try:	
+		config.read(filename)
+
+		# Reading configuration file
+		mysql_server = config.get("gammu-smsd", "server_mysql")
+		mysql_user = config.get("gammu-smsd", "username_mysql")
+		mysql_password = config.get("gammu-smsd", "password_mysql")
+		mysql_db = config.get("gammu-smsd", "database_mysql")
+		
+		server_addr = config.get("jarkomin", "server")
+		fb_feature = config.getboolean("jarkomin", "fb_feature")
+		logfile = config.get("jarkomin", "logfile")
+
+		telkomsel_phoneid = config.get("gammu-smsd-phoneid", "telkomsel_phoneid")
+		xl_phoneid = config.get("gammu-smsd-phoneid", "xl_phoneid")
+		indosat_phoneid = config.get("gammu-smsd-phoneid", "indosat_phoneid")
+		three_phoneid = config.get("gammu-smsd-phoneid", "three_phoneid")
+		axis_phoneid = config.get("gammu-smsd-phoneid", "axis_phoneid")
+			
+	except:
+		logging.error("Error reading configuration file. Exiting.")
+		sys.exit(1)
+		
+	return
 
 def process_sender():
 	# Read SMS from database
-	con = MySQLdb.connect('localhost', 'root', '', 'gammu')
-	cur = con.cursor(MySQLdb.cursors.DictCursor)
-	cur.execute("SELECT * FROM inbox where Processed = 'false'")
-	inbox_rows = cur.fetchall()
-	for inbox in inbox_rows:
-		# Read sender and its content
-		sms_src = inbox['SenderNumber']
-		sms_msg = inbox['TextDecoded']
+	try:
+		con = MySQLdb.connect(mysql_server, mysql_user, mysql_password, mysql_db)	
+		cur = con.cursor(MySQLdb.cursors.DictCursor)
+		cur.execute("SELECT * FROM inbox where Processed = 'false'")
+		inbox_rows = cur.fetchall()
+		for inbox in inbox_rows:
+			# Read sender and its content
+			sms_src = inbox['SenderNumber']
+			sms_msg = inbox['TextDecoded']
 			
-		# Send it to JARKOM.IN Web Apps
-		req_url = server_addr + '/index.php/api_jarkomin/proses_sms_masuk'
-		req_params = urllib.urlencode(dict(no_handphone=sms_src, konten=sms_msg, api_id='jarkominmantebjaya', api_secret_code='semogalolosdikt'))
-		request = urllib2.urlopen(req_url, req_params)
-		response = request.read()		
+			# Send it to JARKOM.IN Web Apps
+			load_http(server_addr + '/index.php/api_jarkomin/proses_sms_masuk', dict(no_handphone=sms_src, konten=sms_msg))
 	
-		print "SMS RCVD: {0}: {1}".format(sms_src, sms_msg)
+			logging.info("SMS RCVD: {0}: {1}".format(sms_src, sms_msg))
 			
-		# Delete it from database
-		cur.execute("UPDATE inbox set Processed = 'true' WHERE ID=" + str(inbox['ID']))
+			# Delete it from database
+			cur.execute("UPDATE inbox set Processed = 'true' WHERE ID=" + str(inbox['ID']))
 			
-	# Close MySQL Connection
-	if con:
-		con.close()
-	return
-
+		# Close MySQL Connection
+		if con:
+			con.close()
+		return
+	except MySQLdb.Error:
+		logging.error("Error while connecting to MySQL database.")
+		sys.exit(1)
 # Define Indonesian Mobile Phone Operator Prefix Number
 telkomsel_prefix = ["0811", "0812", "0813", "0821", "0822", "0823", "0852"]
 xl_prefix = ["0817", "0818", "0819", "0859", "0874", "0876", "0877", "0878", "0879"]
@@ -46,53 +91,49 @@ axis_prefix = ["0838", "0832", "0831"]
 
 def process_fetcher_sms():
 	# Request Process
-	req_url = server_addr + '/index.php/api_jarkomin/lihat_sms_siap_kirim'
-	
-	# We don't use it yet
-	req_params = urllib.urlencode(dict(api_id='jarkominmantebjaya', api_secret_code='semogalolosdikt'))
-	request = urllib2.urlopen(req_url, req_params)
-	response = request.readline()
+	response = load_http(server_addr + '/index.php/api_jarkomin/lihat_sms_siap_kirim', dict(api_id='jarkominmantebjaya', api_secret_code='semogalolosdikt'))
 
 	# JSON Decode
 	json_data = json.loads(response)
 
 	# Connecting to MYSQL Server
-	mysql_con = _mysql.connect('localhost', 'root', '', 'gammu')
+	try:
+		mysql_con = _mysql.connect(mysql_server, mysql_user, mysql_password, mysql_db)
 
-	# Iterating data and entry to MYSQL Gammu server
-	for i in json_data:
-		sms_id = i['id_sms_pesanan']
-		sms_dest = i['no_handphone']
-		sms_msg = i['konten']
-		sms_dest_prefix_num = sms_dest[:4]
+		# Iterating data and entry to MYSQL Gammu server
+		for i in json_data:
+			sms_id = i['id_sms_pesanan']
+			sms_dest = i['no_handphone']
+			sms_msg = i['konten']
+			sms_dest_prefix_num = sms_dest[:4]
 
-		# Operator classification
-		if(sms_dest_prefix_num in telkomsel_prefix):
-			sms_op = "telkomsel"
-		elif(sms_dest_prefix_num in xl_prefix):
-			sms_op = "xl"
-		elif(sms_dest_prefix_num in indosat_prefix):
-			sms_op = "indosat"
-		elif(sms_dest_prefix_num in hutch_prefix):
-			sms_op = "hutch"
-		elif(sms_dest_prefix_num in axis_prefix):
-			sms_op = "axis"
+			# Operator classification
+			if(sms_dest_prefix_num in telkomsel_prefix):
+				sms_op = telkomsel_phoneid
+			elif(sms_dest_prefix_num in xl_prefix):
+				sms_op = xl_phoneid
+			elif(sms_dest_prefix_num in indosat_prefix):
+				sms_op = indosat_phoneid
+			elif(sms_dest_prefix_num in hutch_prefix):
+				sms_op = three_phoneid
+			elif(sms_dest_prefix_num in axis_prefix):
+				sms_op = axis_phoneid
 		
 		
-		print "SMS SENT: " + sms_dest + ": " + sms_msg
-		#mysql_con.query("INSERT INTO outbox(DestinationNumber, TextDecoded, SenderID) VALUES ('" + sms_dest + "','" + sms_msg + "','" + sms_op + ")")
-		mysql_con.query("INSERT INTO outbox(DestinationNumber, TextDecoded) VALUES ('" + sms_dest + "','" + sms_msg + "')")
+			logging.info ("SMS SENT: " + sms_dest + ": " + sms_msg)
+			#mysql_con.query("INSERT INTO outbox(DestinationNumber, TextDecoded, SenderID) VALUES ('" + sms_dest + "','" + sms_msg + "','" + sms_op + ")")
+			mysql_con.query("INSERT INTO outbox(DestinationNumber, TextDecoded) VALUES ('" + sms_dest + "','" + sms_msg + "')")
 
-		# Mark the message as received
-		req_url = server_addr + '/index.php/api_jarkomin/tandai_sms_sudah_terkirim'
-		req_params = urllib.urlencode(dict(id_sms_pesanan=sms_id, api_id='jarkominmantebjaya', api_secret_code='semogalolosdikt'))
-		request = urllib2.urlopen(req_url, req_params)
-		response = request.readline()
+			# Mark the message as received
+			load_http(server_addr + '/index.php/api_jarkomin/tandai_sms_sudah_terkirim', dict(id_sms_pesanan=sms_id, api_id='jarkominmantebjaya', api_secret_code='semogalolosdikt'))
 		
-	# Close MySQL Connection
-	if mysql_con:
-		mysql_con.close()
-	return
+		# Close MySQL Connection
+		if mysql_con:
+			mysql_con.close()
+		return
+	except _mysql.Error:
+		logging.error("Error while connecting to MySQL database.")
+		sys.exit(1)
 
 def process_fetcher_fb():
 	# Request Process
@@ -113,7 +154,7 @@ def process_fetcher_fb():
 		msg_msg = i['konten']
 		
 		
-		print "FB MSG SENT: " + msg_dest + ": " + msg_msg
+		logging.info("FB MSG SENT: " + msg_dest + ": " + msg_msg)
 		
 		# Run fb-sender.sh
 		subprocess.call("./fb-sender.sh " + msg_dest + " '" + msg_msg + "'", shell=True); 
@@ -127,8 +168,44 @@ def process_fetcher_fb():
 	
 	return
 
-while(1):
-	process_fetcher_sms()
-	process_fetcher_fb()
-	process_sender()
-	time.sleep(20)
+
+def do_backend(configfile):
+	i = 0
+	read_configuration(configfile)
+	prepare_log_file()	
+	while(1):
+		logging.info("Starting JARKOM.IN Backend System...")
+		logging.info("** Iteration #" + str(i))
+		logging.info("Fetch SMS from app..")
+		process_fetcher_sms()
+		if (fb_feature):
+			logging.info("Fetch FB Message from app..")
+			process_fetcher_fb()
+		logging.info("Send retrieved SMS to app..")
+		process_sender()
+		logging.info("Wait for 20 seconds for next iteration..")
+		time.sleep(20)
+		i = i + 1
+	return
+
+def main():
+	# Look at the argument
+	optlist, args = getopt.getopt(sys.argv[1:], "hc:")
+	config = "./jarkomin-backend.ini"
+	for opt, arg in optlist:
+		if(opt == '-h'):
+			print 'JARKOMIN Backend System'
+			print 'Argument list:'
+			print '-h -- Show this help'
+			print '-c <config-file> -- Defined config file location'
+			print 'By default, this script would look at \"jarkomin-backend.py\" file'
+			sys.exit(0)
+		elif(opt == '-c'):
+			config = arg
+		
+	
+	do_backend(config)
+	return
+	
+main()
+		
