@@ -6,6 +6,10 @@ import _mysql, MySQLdb, time
 import datetime, sys, getopt
 import ConfigParser
 import logging
+import subprocess
+import os
+
+from math import ceil
 
 def load_http(req_url, req_params):
 	try:
@@ -57,7 +61,9 @@ def process_sender():
 	try:
 		con = MySQLdb.connect(mysql_server, mysql_user, mysql_password, mysql_db)	
 		cur = con.cursor(MySQLdb.cursors.DictCursor)
-		cur.execute("SELECT * FROM inbox where Processed = 'false'")
+		
+		# First, process non multipart message
+		cur.execute("SELECT * FROM inbox where Processed = 'false' AND UDH = ''")
 		inbox_rows = cur.fetchall()
 		for inbox in inbox_rows:
 			# Read sender and its content
@@ -71,7 +77,25 @@ def process_sender():
 			
 			# Delete it from database
 			cur.execute("UPDATE inbox set Processed = 'true' WHERE ID=" + str(inbox['ID']))
+		
+		# Second, process multiparted message
+		cur.execute("SELECT GROUP_CONCAT(ID separator ',') AS id_concat, SenderNumber, GROUP_CONCAT(TextDecoded SEPARATOR '') AS TextDecoded FROM inbox WHERE Processed='false' GROUP BY LEFT(UDH, 10)")
+		inbox_rows = cur.fetchall()
+		for inbox in inbox_rows:
+			# Read sender and its content
+			sms_src = inbox['SenderNumber']
+			sms_msg = inbox['TextDecoded']
 			
+			# Send it to JARKOM.IN Web Apps
+			load_http(server_addr + '/index.php/api_jarkomin/proses_sms_masuk', dict(no_handphone=sms_src, konten=sms_msg))
+	
+			logging.info("SMS RCVD: {0}: {1}".format(sms_src, sms_msg))
+			
+			# Delete it from database
+			id_concat = str(inbox['id_concat']).split(",")
+			for id in id_concat:
+				cur.execute("UPDATE inbox set Processed = 'true' WHERE ID=" + id)
+
 		# Close MySQL Connection
 		if con:
 			con.close()
@@ -98,7 +122,10 @@ def process_fetcher_sms():
 
 	# Connecting to MYSQL Server
 	try:
-		mysql_con = _mysql.connect(mysql_server, mysql_user, mysql_password, mysql_db)
+		mysql_con = MySQLdb.connect(mysql_server, mysql_user, mysql_password, mysql_db)
+		mysql_cur = mysql_con.cursor()
+
+		multipart_counter = 0
 
 		# Iterating data and entry to MYSQL Gammu server
 		for i in json_data:
@@ -118,12 +145,31 @@ def process_fetcher_sms():
 				sms_op = three_phoneid
 			elif(sms_dest_prefix_num in axis_prefix):
 				sms_op = axis_phoneid
+			else:
+				sms_op = three_phoneid
 		
-		
-			logging.info ("SMS SENT: " + sms_dest + ": " + sms_msg)
-			#mysql_con.query("INSERT INTO outbox(DestinationNumber, TextDecoded, SenderID) VALUES ('" + sms_dest + "','" + sms_msg + "','" + sms_op + ")")
-			mysql_con.query("INSERT INTO outbox(DestinationNumber, TextDecoded) VALUES ('" + sms_dest + "','" + sms_msg + "')")
+			logging.info ("SMS SENT via " + sms_op + ": " + sms_dest + ": " + sms_msg)
 
+			# Check SMS part number
+			sms_part = int(len(sms_msg)/160)
+
+			if sms_part == 1:
+				mysql_cur.execute("INSERT INTO outbox(DestinationNumber, TextDecoded, SenderID) VALUES ('" + sms_dest + "','" + sms_msg + "','" + sms_op + "')")
+			else:
+				# Send multipart message
+				UDH_prefix = "050003" + ("%2x" % multipart_counter).replace(" ", "0").upper() + ("%02d" % sms_part)
+				multipart_counter = multipart_counter + 1
+				
+				# Split the message by size
+				message_splited = [ sms_msg[i:i+160] for i in range(0, len(sms_msg), 160) ]
+				
+				mysql_cur.execute("INSERT INTO outbox(DestinationNumber, TextDecoded, SenderID, UDH, MultiPart) VALUES ('" + sms_dest + "','" + message_splited[0] + "','" + sms_op + "','" + UDH_prefix + "01" + "', 'true')")
+				
+				last_id = mysql_cur.lastrowid
+				
+				for UDH_count in range(2, sms_part+1):
+					mysql_cur.execute("INSERT INTO outbox_multipart(ID, SequencePosition, TextDecoded, UDH) VALUES ('" + str(int(last_id)) + "','" + str(UDH_count) + "','" + message_splited[UDH_count-1] + "','" + UDH_prefix + ("%02d" % UDH_count) + "')")
+				
 			# Mark the message as received
 			load_http(server_addr + '/index.php/api_jarkomin/tandai_sms_sudah_terkirim', dict(id_sms_pesanan=sms_id, api_id='jarkominmantebjaya', api_secret_code='semogalolosdikt'))
 		
@@ -131,7 +177,7 @@ def process_fetcher_sms():
 		if mysql_con:
 			mysql_con.close()
 		return
-	except _mysql.Error:
+	except MySQLdb.Error:
 		logging.error("Error while connecting to MySQL database.")
 		sys.exit(1)
 
@@ -157,7 +203,7 @@ def process_fetcher_fb():
 		logging.info("FB MSG SENT: " + msg_dest + ": " + msg_msg)
 		
 		# Run fb-sender.sh
-		subprocess.call("./fb-sender.sh " + msg_dest + " '" + msg_msg + "'", shell=True); 
+		subprocess.call(["./fb-sender.sh", msg_dest, msg_msg]); 
 
 		# Mark the message as received
 		req_url = server_addr + '/index.php/api_jarkomin/tandai_pesan_grup_sudah_terkirim'

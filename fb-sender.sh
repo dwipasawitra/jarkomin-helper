@@ -2,9 +2,9 @@
 # Fixed from http://360percents.com/posts/bash-script-to-update-facebook-status-linux-mac-os-x/
 #
 
-email="fb-account"
-pass="fb-password"
-status="$2" #must be less than 420 chars
+email="fblogin"
+pass="fbpassword"
+status="$2 [Dikirim Via Bot JARKOM.IN]" #must be less than 420 chars
 
 touch "cookie.txt" #create a temp. cookie file
 loginpage=`curl -s -c ./cookie.txt -A "Mozilla/5.0" "https://m.facebook.com"` #initial cookies
